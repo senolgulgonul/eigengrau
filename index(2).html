@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<!--
+  eigengrau — phosphene field
+  A WebGL toy that mimics closed-eye visual noise (eigengrau + drifting ember field).
+  For contemplation only; not a psychological test.
+
+  Copyright (c) 2026 Şenol Gülgönül
+  Licensed under CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+  https://senolgulgonul.github.io/eigengrau
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>eigengrau · phosphene field</title>
+<style>
+  :root{
+    --mono:'JetBrains Mono','SFMono-Regular',ui-monospace,Menlo,Consolas,monospace;
+    --sans:'Inter','Segoe UI',system-ui,-apple-system,Helvetica,Arial,sans-serif;
+    --amber:#e8853a;
+    --txt:#e9e2d6;
+    --muted:#9a8f80;
+    --glass:rgba(18,16,16,.62);
+    --glass-line:rgba(232,133,58,.22);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;overflow:hidden;background:#0a0909;color:var(--txt);font-family:var(--sans)}
+  #gl{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+
+  /* top control bar — everything lives here; below is only the field */
+  .topbar{
+    position:fixed;top:0;left:0;right:0;z-index:6;
+    display:flex;align-items:center;gap:24px;flex-wrap:wrap;
+    padding:10px 18px;
+    background:rgba(15,13,13,.60);
+    backdrop-filter:blur(11px);-webkit-backdrop-filter:blur(11px);
+    border-bottom:1px solid var(--glass-line);
+  }
+  .brand{display:flex;align-items:baseline;gap:12px;margin-right:auto}
+  .brand h1{margin:0;font-size:15px;font-weight:600;letter-spacing:.02em}
+  .brand .note{font-family:var(--mono);font-size:10px;color:var(--muted);letter-spacing:.05em;text-transform:uppercase}
+
+  .controls{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  .ctl{display:flex;flex-direction:column;gap:4px;min-width:138px}
+  .ctl label{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .ctl label b{color:var(--txt);font-weight:500}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:3px;background:#3a322b;outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--amber);cursor:pointer;box-shadow:0 0 8px rgba(232,133,58,.6)}
+  input[type=range]::-moz-range-thumb{width:15px;height:15px;border:none;border-radius:50%;background:var(--amber);cursor:pointer}
+
+  .runstop{
+    font-family:var(--mono);font-size:12px;letter-spacing:.04em;padding:9px 16px;border-radius:8px;cursor:pointer;
+    border:1px solid var(--glass-line);background:rgba(40,34,30,.6);color:var(--txt);user-select:none;transition:.08s;white-space:nowrap
+  }
+  .runstop:hover{border-color:var(--amber)}
+  .runstop:active,.runstop.on{background:var(--amber);color:#180d04;border-color:var(--amber)}
+
+  .err{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:13px}
+
+  @media(max-width:600px){
+    .topbar{gap:12px 16px;padding:9px 12px}
+    .brand{width:100%;margin-right:0}
+    .brand .note{display:none}
+    .controls{width:100%;gap:14px}
+    .ctl{flex:1;min-width:110px}
+  }
+  @media (prefers-reduced-motion: reduce){.runstop{transition:none}}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div class="topbar">
+  <div class="brand">
+    <h1>eigengrau</h1>
+    <span class="note">phosphene field · inner light · for contemplation · not a test</span>
+  </div>
+  <div class="controls">
+    <div class="ctl">
+      <label>Intensity <b id="vInt">0.05</b></label>
+      <input type="range" id="sInt" min="0" max="0.1" step="0.005" value="0.05">
+    </div>
+    <div class="ctl">
+      <label>Flow speed <b id="vSpd">0.05</b></label>
+      <input type="range" id="sSpd" min="0" max="0.1" step="0.005" value="0.05">
+    </div>
+    <button class="runstop" id="playToggle" aria-pressed="false">⏸ Stop</button>
+  </div>
+</div>
+
+<script>
+const canvas=document.getElementById('gl');
+const gl=canvas.getContext('webgl')||canvas.getContext('experimental-webgl');
+if(!gl){document.body.innerHTML='<div class="err">WebGL is unavailable in this browser. Enable hardware acceleration and reload.</div>';}
+
+const VERT=`
+attribute vec2 p; void main(){ gl_Position=vec4(p,0.,1.); }
+`;
+
+const FRAG=`
+precision highp float;
+uniform vec2  uRes;
+uniform float uTime;
+uniform float uInt;     // intensity
+uniform float uSpd;     // flow speed
+uniform vec2  uMouse;   // -1..1, attractor
+uniform float uMouseOn;
+
+// ---- 3D value noise: 3rd axis = time, so the field boils in place (no net drift) ----
+float hash3(vec3 p){ p=fract(p*0.3183099+vec3(0.11,0.27,0.43)); p+=dot(p,p.yzx+19.19); return fract((p.x+p.y)*p.z); }
+float vnoise3(vec3 x){
+  vec3 i=floor(x), f=fract(x); vec3 u=f*f*(3.-2.*f);
+  float n=mix(mix(mix(hash3(i+vec3(0,0,0)),hash3(i+vec3(1,0,0)),u.x),
+                  mix(hash3(i+vec3(0,1,0)),hash3(i+vec3(1,1,0)),u.x),u.y),
+              mix(mix(hash3(i+vec3(0,0,1)),hash3(i+vec3(1,0,1)),u.x),
+                  mix(hash3(i+vec3(0,1,1)),hash3(i+vec3(1,1,1)),u.x),u.y),u.z);
+  return n;
+}
+float fbm3(vec3 p){
+  float s=0., a=0.55;
+  for(int i=0;i<5;i++){ s+=a*vnoise3(p); p=p*1.92+vec3(11.3,17.1,5.7); a*=0.55; }
+  return s;
+}
+
+// narrow near-black orange ramp: floor is a warm near-black, peak only a dim orange
+vec3 ember(float t){
+  t=clamp(t,0.,1.);
+  vec3 lo=vec3(0.045,0.018,0.005);   // near-black orange (no pure black)
+  vec3 hi=vec3(0.46,0.18,0.045);     // dim orange peak (kept dark, narrow band)
+  return mix(lo,hi,pow(t,1.25));     // ease so most of the field stays low
+}
+
+void main(){
+  vec2 uv=(gl_FragCoord.xy-0.5*uRes)/min(uRes.x,uRes.y); // centered, aspect-correct
+  float t=uTime*uSpd*3.0;   // rate scales with speed; uSpd=0 -> fully frozen
+
+  // ---- in-place boiling ember field (3rd noise axis = time, so no net drift) ----
+  vec3 P=vec3(uv*1.9, t*0.6);
+  // bounded, in-place domain wobble (warp vectors themselves evolve in z; no linear t in xy)
+  vec2 w=vec2(fbm3(P+vec3(0.0,0.0,1.3)), fbm3(P+vec3(5.2,1.7,-2.0)))-0.6;
+  P.xy += 0.45*w;
+  float field=fbm3(P*1.25);
+  field=pow(max(field,0.0),1.45);
+
+  // ---- slow cloud swell: large, slow density wave so regions brighten and fade like clouds ----
+  float swell=fbm3(vec3(uv*0.55+vec2(13.0,-5.0), t*0.22));
+  swell=0.55+0.85*smoothstep(0.30,0.85,swell);   // gentle multiplier ~0.55..1.40
+
+  // pointer attractor brightening (subtle)
+  float att=0.;
+  if(uMouseOn>0.5){ att=smoothstep(0.5,0.0,length(uv-uMouse))*0.5; }
+
+  float bright=field*swell*(0.85 + uInt*3.0) + att;   // uInt 0..0.1 -> gain 0.85..1.15
+
+  // ---- color ----
+  vec3 col=ember(bright);
+
+  // very soft vignette: edges stay within the warm band, never fully black
+  float vig=smoothstep(1.25,0.30,length(uv));
+  col*=0.78+0.22*vig;
+
+  gl_FragColor=vec4(col,1.0);
+}
+`;
+
+function compile(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(s));return s;}
+const prog=gl.createProgram();
+gl.attachShader(prog,compile(gl.VERTEX_SHADER,VERT));
+gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,FRAG));
+gl.linkProgram(prog);gl.useProgram(prog);
+
+const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 3,-1, -1,3]),gl.STATIC_DRAW);
+const loc=gl.getAttribLocation(prog,'p');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+
+const U={};['uRes','uTime','uInt','uSpd','uMouse','uMouseOn'].forEach(n=>U[n]=gl.getUniformLocation(prog,n));
+
+// ---- state ----
+const reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+let state={int:0.05,spd:reduce?0.02:0.05,mouse:[0,0],mouseOn:0};
+
+function resize(){
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  canvas.width=Math.floor(innerWidth*dpr);canvas.height=Math.floor(innerHeight*dpr);
+  canvas.style.width=innerWidth+'px';canvas.style.height=innerHeight+'px';
+  gl.viewport(0,0,canvas.width,canvas.height);
+}
+addEventListener('resize',resize);resize();
+
+let simT=0, lastNow=performance.now(), paused=false;
+function frame(now){
+  const dt=Math.min((now-lastNow)/1000, 0.05); lastNow=now;
+  if(!paused) simT+=dt;
+  gl.uniform2f(U.uRes,canvas.width,canvas.height);
+  gl.uniform1f(U.uTime,simT);
+  gl.uniform1f(U.uInt,state.int);
+  gl.uniform1f(U.uSpd,state.spd);
+  gl.uniform2f(U.uMouse,state.mouse[0],state.mouse[1]);
+  gl.uniform1f(U.uMouseOn,state.mouseOn);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  requestAnimationFrame(frame);
+}
+if(gl)requestAnimationFrame(frame);
+
+// ---- pause / play (freeze a random shape) ----
+const playToggle=document.getElementById('playToggle');
+playToggle.addEventListener('click',()=>{
+  paused=!paused;
+  playToggle.setAttribute('aria-pressed',paused);
+  playToggle.classList.toggle('on',paused);
+  playToggle.innerHTML = paused ? '▶ Run' : '⏸ Stop';
+});
+
+// ---- sliders ----
+function bind(id,key,label){const el=document.getElementById(id);const out=document.getElementById(label);
+  el.addEventListener('input',()=>{state[key]=parseFloat(el.value);out.textContent=el.value;});}
+bind('sInt','int','vInt');bind('sSpd','spd','vSpd');
+if(reduce){document.getElementById('sSpd').value=state.spd;document.getElementById('vSpd').textContent=state.spd.toFixed(3);}
+
+// ---- pointer attractor ----
+function setMouse(e){const t=e.touches?e.touches[0]:e;
+  const x=(t.clientX/innerWidth)*2-1; const y=-((t.clientY/innerHeight)*2-1);
+  const asp=Math.min(innerWidth,innerHeight);
+  state.mouse=[x*innerWidth/asp*0.5, y*innerHeight/asp*0.5]; state.mouseOn=1;}
+canvas.addEventListener('mousemove',e=>{if(e.buttons)setMouse(e);});
+canvas.addEventListener('mousedown',e=>{setMouse(e);state.mouseOn=1;});
+canvas.addEventListener('mouseup',()=>state.mouseOn=0);
+canvas.addEventListener('mouseleave',()=>state.mouseOn=0);
+canvas.addEventListener('touchstart',e=>{setMouse(e);},{passive:true});
+canvas.addEventListener('touchmove',e=>{setMouse(e);},{passive:true});
+canvas.addEventListener('touchend',()=>state.mouseOn=0);
+</script>
+</body>
+</html>
